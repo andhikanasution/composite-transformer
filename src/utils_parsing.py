@@ -107,22 +107,28 @@ def build_sample_mapping(data_dir):
 
 def pad_sequence(seq, max_len, pad_value=0.0):
     """
-    Pad or truncate a sequence to the specified maximum length.
+    Left-pad (or left-truncate) a 2D sequence to exactly max_len time steps.
+    - If seq is longer than max_len: keep *the last* max_len rows.
+    - If seq is shorter: pre-pend zeros so that the final entry (idx=-1)
+      is always the true last time-step.
 
     Args:
-        seq (np.ndarray): Array of shape [T, D]
-        max_len (int): Desired output length
-        pad_value (float): Value to use for padding (default: 0.0)
+        seq (np.ndarray): [T, D] original time series
+        max_len (int):    desired length
+        pad_value (float): scalar to pad with (default=0.0)
 
     Returns:
-        np.ndarray of shape [max_len, D]
+        np.ndarray of shape [max_len, D], with true data ending at index -1
     """
     T, D = seq.shape
     if T >= max_len:
-        return seq[:max_len]
+        # Truncate from the front so we keep the *most recent* max_len steps
+        return seq[-max_len:, :]
     else:
+        # Pre-pend padding so that `seq` ends at the very end
         pad = np.full((max_len - T, D), pad_value)
-        return np.vstack([seq, pad])
+        return np.vstack([pad, seq])
+
 
 
 def load_all_data(input_csv_path,
