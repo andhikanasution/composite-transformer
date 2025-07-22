@@ -67,7 +67,7 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR = "models"
+    MODEL_DIR = "models/patchtst_5pc_v2"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     BATCH_SIZE = 32
@@ -93,7 +93,7 @@ def main():
         ffn_dim=512,  # feed-forward dim
         norm_type="batchnorm",  # batch normalization
         loss="mse",  # objective
-        scaling="std",  # enable internal standardisation
+        scaling="None",  # enable internal standardisation
         share_embedding=True,  # share embeddings across channels
         positional_encoding_type="sincos"  # sinusoidal positional encodings
     )

@@ -42,7 +42,7 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR = "models/patchtst_5pc"
+    MODEL_DIR = "models/patchtst_5pc_v2"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     WEIGHTS_PATH       = os.path.join(MODEL_DIR, "patchtst_5pc.pt")
@@ -76,7 +76,7 @@ def main():
         ffn_dim=512,
         norm_type="batchnorm",
         loss="mse",
-        scaling="std",                   # let model apply its internal scaler
+        scaling=None,                   # let model apply its internal scaler
         share_embedding=True,
         positional_encoding_type="sincos"
     )
@@ -98,11 +98,11 @@ def main():
         max_seq_len=MAX_SEQ_LEN,
         batch_size=BATCH_SIZE,
         shuffle=False,
+        scale=True,
         num_workers=NUM_WORKERS,
         split="val",
         split_ratio=SPLIT_RATIO,
         seed=SEED,
-        scale=False
     )
 
     # ──────────────────────────────────────────────
@@ -120,7 +120,8 @@ def main():
             preds = target_scaler.inverse_transform(preds_std)
 
             # ground truth is the stress at the final time-step: [B, T, 6] → select [:, -1, :]
-            trues = batch_y[:, -1, :].cpu().numpy()
+            trues_std = batch_y[:, -1, :].cpu().numpy()
+            trues = target_scaler.inverse_transform(trues_std)
             all_preds.append(preds)
             all_trues.append(trues)
 
