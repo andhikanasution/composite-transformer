@@ -45,7 +45,7 @@ def main():
     MODEL_DIR = "models/patchtst_5pc_v2"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    WEIGHTS_PATH       = os.path.join(MODEL_DIR, "patchtst_5pc.pt")
+    WEIGHTS_PATH       = os.path.join(MODEL_DIR, "patchtst_best.pt")
     METRICS_JSON_PATH  = os.path.join(MODEL_DIR, "patchtst_5pc_eval_metrics.json")
     PLOT_PATH          = os.path.join(MODEL_DIR, "patchtst_5pc_scatter.png")
 
@@ -74,7 +74,7 @@ def main():
         num_hidden_layers=3,
         num_attention_heads=4,
         ffn_dim=512,
-        norm_type="batchnorm",
+        norm_type="layernorm",
         loss="mse",
         scaling=None,                   # let model apply its internal scaler
         share_embedding=True,
