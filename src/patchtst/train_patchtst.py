@@ -21,7 +21,10 @@ import psutil
 import torch
 from torchinfo import summary
 from tqdm import tqdm
-from transformers import PatchTSTConfig, PatchTSTForRegression
+from transformers import PatchTSTConfig, PatchTSTForRegression, get_cosine_schedule_with_warmup
+from torch.nn.utils import clip_grad_norm_
+import numpy as np
+from sklearn.metrics import r2_score
 
 # Project-specific data loader (applies utils_parsing & normalization)
 from src.dataloader import get_dataloader
@@ -67,13 +70,14 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR = "models/patchtst_5pc_v2"
+    MODEL_DIR = "models/patchtst_5pc_v3"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     BATCH_SIZE = 32
     MAX_EPOCHS = 100  # maximum number of epochs to run
+    WARMUP_PCT = 0.05  # 5% of total steps
     PATIENCE = 10  # stop if no val-loss improvement after this many epochs
-    best_val_loss = float("inf")
+    best_val_r2   = -float("inf")
     epochs_no_improve = 0
     best_model_path = os.path.join(MODEL_DIR, "patchtst_best.pt")
     LEARNING_RATE = 1e-4
@@ -97,7 +101,7 @@ def main():
         ffn_dim=512,  # feed-forward dim
         norm_type="layernorm",  # batch normalization
         loss="mse",  # objective
-        scaling="None",  # enable internal standardisation
+        scaling=None,  # enable internal standardisation
         share_embedding=True,  # share embeddings across channels
         positional_encoding_type="sincos",  # sinusoidal positional encodings
         attention_dropout=0.1,
@@ -149,16 +153,18 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-    criterion = torch.nn.MSELoss()
+    criterion = torch.nn.SmoothL1Loss()  # Huber loss δ=1.0
+    total_steps = MAX_EPOCHS * len(train_loader)
+    warmup_steps = int(WARMUP_PCT * total_steps)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, warmup_steps, total_steps
+    )
 
     # For memory profiling
     process = psutil.Process(os.getpid())
     mem_before_train = process.memory_info().rss
     t_train_start = time.time()
 
-    # ──────────────────────────────────────────────
-    # 5) Training Loop with Progress Bar
-    # ──────────────────────────────────────────────
     # ──────────────────────────────────────────────
     # 5) Training Loop with Early Stopping
     # ──────────────────────────────────────────────
@@ -173,27 +179,45 @@ def main():
             true = by[:, -1, :].to(device)
             loss = criterion(pred, true)
             loss.backward()
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             train_loss += loss.item() * bx.size(0)
         train_loss /= len(train_loader.dataset)
 
         # ——— validation pass —————————————————————————————
         model.eval()
+        # — single validation pass: collect preds/trues, compute val_loss & macro‐R² →
+        all_v_preds, all_v_trues = [], []
         val_loss = 0.0
-        with torch.no_grad():
-            for vx, vy in val_loader:
-                out = model(past_values=vx.to(device))
-                pred = out.regression_outputs.squeeze(1)
-                true = vy[:, -1, :].to(device)
-                val_loss += criterion(pred, true).item() * vx.size(0)
+        for vx, vy in val_loader:
+            out = model(past_values=vx.to(device))
+            pred_t = out.regression_outputs.squeeze(1)
+            true_t = vy[:, -1, :].to(device)
+            # accumulate loss on tensor form
+            val_loss += criterion(pred_t, true_t).item() * vx.size(0)
+
+            # store for R²
+            all_v_preds.append(pred_t.detach().cpu().numpy())
+            all_v_trues.append(true_t.detach().cpu().numpy())
+
+        # normalize loss
         val_loss /= len(val_loader.dataset)
+
+        # compute macro‐R²
+        all_v_preds = np.vstack(all_v_preds)
+        all_v_trues = np.vstack(all_v_trues)
+        val_r2 = np.mean([
+            r2_score(all_v_trues[:, i], all_v_preds[:, i])
+            for i in range(all_v_preds.shape[1])
+        ])
 
         dt = time.time() - t0
         print(f"Epoch {epoch}/{MAX_EPOCHS} — train_loss: {train_loss:.4f} — val_loss: {val_loss:.4f} — time: {dt:.1f}s")
 
         # ——— early-stop logic ————————————————————————————
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_r2 > best_val_r2:  # flip to R² maximisation
+            best_val_r2 = val_r2
             epochs_no_improve = 0
             torch.save(model.state_dict(), best_model_path)
             print(f"  💾  New best model (val {val_loss:.4f}) saved to {best_model_path}")

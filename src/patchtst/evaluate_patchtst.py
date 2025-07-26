@@ -42,7 +42,7 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR = "models/patchtst_5pc_v2"
+    MODEL_DIR = "models/patchtst_5pc_v3"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     WEIGHTS_PATH       = os.path.join(MODEL_DIR, "patchtst_best.pt")
@@ -64,21 +64,23 @@ def main():
     # ──────────────────────────────────────────────
     # Must match the config used during training
     config = PatchTSTConfig(
-        num_input_channels=11,           # 6 strain + θ + 4 lam params
-        num_targets=6,                   # 6 stress outputs
-        context_length=MAX_SEQ_LEN,      # full history
-        prediction_length=1,             # point-wise
-        patch_length=16,
-        patch_stride=16,
-        d_model=128,
-        num_hidden_layers=3,
-        num_attention_heads=4,
-        ffn_dim=512,
-        norm_type="layernorm",
-        loss="mse",
-        scaling=None,                   # let model apply its internal scaler
-        share_embedding=True,
-        positional_encoding_type="sincos"
+        num_input_channels=11,  # 6 strain + 5 static metadata
+        num_targets=6,  # 6 stress outputs
+        context_length=MAX_SEQ_LEN,  # look-back window
+        prediction_length=1,  # point-wise
+        patch_length=16,  # patch size
+        patch_stride=16,  # no overlap
+        d_model=128,  # embedding dim
+        num_hidden_layers=3,  # transformer depth
+        num_attention_heads=4,  # heads per layer
+        ffn_dim=512,  # feed-forward dim
+        norm_type="layernorm",  # batch normalization
+        loss="mse",  # objective
+        scaling=None,  # enable internal standardisation
+        share_embedding=True,  # share embeddings across channels
+        positional_encoding_type="sincos",  # sinusoidal positional encodings
+        attention_dropout=0.1,
+        ff_dropout=0.1
     )
     model = PatchTSTForRegression(config)
     # load the trained weights
