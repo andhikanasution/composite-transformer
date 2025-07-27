@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 from utils_parsing import load_all_data
 from normalisation import compute_stats, StandardScaler, apply_scaling
+import numpy as np
 
 class CompositeStressDataset(Dataset):
     """
@@ -62,14 +63,31 @@ class CompositeStressDataset(Dataset):
             self.input_scaler = StandardScaler(input_mean, input_std)
             self.target_scaler = StandardScaler(target_mean, target_std)
 
-            self.inputs = apply_scaling(self.inputs_raw, self.input_scaler)
-            self.targets = apply_scaling(self.targets_raw, self.target_scaler)
+            # scale both inputs and targets
+            self.inputs = apply_scaling(self.inputs_raw, self.input_scaler)  # list of [T,11]
+            self.targets = apply_scaling(self.targets_raw, self.target_scaler)  # list of [T, 6]
         else:
             self.inputs = self.inputs_raw
             self.targets = self.targets_raw
 
-        self.inputs = [torch.tensor(x, dtype=torch.float32) for x in self.inputs]
-        self.targets = [torch.tensor(y, dtype=torch.float32) for y in self.targets]
+        # ──────────────────────────────────────────────────────
+        # Teacher‐forcing: build lagged‐stress channels
+        # for each sequence, prepend a zero‐row and drop its last true
+        lagged = []
+        for y in self.targets:  # y: [T,6]
+            # first timestep has no prior stress → zero
+            pad0 = np.zeros((1, y.shape[1]), dtype=y.dtype)
+            lag = np.vstack([pad0, y[:-1]])  # [T,6]
+            lagged.append(lag)
+
+        # append those 6 lagged stress channels to your original 11-dim inputs
+        self.inputs = [
+            np.concatenate([x, lag], axis=1)  # now [T, 11+6=17]
+            for x, lag in zip(self.inputs, lagged)
+        ]
+
+        self.inputs  = [torch.tensor(x, dtype=torch.float32) for x in self.inputs]   # [T,17]
+        self.targets = [torch.tensor(y, dtype=torch.float32) for y in self.targets]  # [T, 6]
 
     def __len__(self):
         """Returns total number of samples in the dataset."""

@@ -42,7 +42,7 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR = "models/patchtst_5pc_v3"
+    MODEL_DIR = "models/patchtst_5pc_v4"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     WEIGHTS_PATH       = os.path.join(MODEL_DIR, "patchtst_best.pt")
@@ -64,7 +64,7 @@ def main():
     # ──────────────────────────────────────────────
     # Must match the config used during training
     config = PatchTSTConfig(
-        num_input_channels=11,  # 6 strain + 5 static metadata
+        num_input_channels=17,  # 11 original + 6 lagged‐stress channels
         num_targets=6,  # 6 stress outputs
         context_length=MAX_SEQ_LEN,  # look-back window
         prediction_length=1,  # point-wise
@@ -114,7 +114,7 @@ def main():
     all_trues = []
     with torch.no_grad():
         for batch_x, batch_y in tqdm(val_loader, desc="Evaluating"):
-            batch_x = batch_x.to(device)      # [B, T, 11]
+            batch_x = batch_x.to(device)      # [B, T, 17]  ← now 11 original channels + 6 lagged‐stress
             outputs = model(past_values=batch_x)
             # regression_outputs: [B, 1, 6] → squeeze to [B, 6]
             preds_std = outputs.regression_outputs.squeeze(1).cpu().numpy()

@@ -70,7 +70,7 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR = "models/patchtst_5pc_v3"
+    MODEL_DIR = "models/patchtst_5pc_v4"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     BATCH_SIZE = 32
@@ -89,7 +89,7 @@ def main():
     # 2) Configure & Instantiate PatchTST
     # ──────────────────────────────────────────────
     config = PatchTSTConfig(
-        num_input_channels=11,  # 6 strain + 5 static metadata
+        num_input_channels=17,  # 11 original + 6 lagged‐stress channels
         num_targets=6,  # 6 stress outputs
         context_length=MAX_SEQ_LEN,  # look-back window
         prediction_length=1,  # point-wise
