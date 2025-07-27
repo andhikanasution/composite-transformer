@@ -70,7 +70,8 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR = "models/patchtst_5pc_v4"
+    USE_LAGGED_STRESS = True  # Set to False for 11-channel input (no teacher-forcing)
+    MODEL_DIR = f"models/patchtst_5pc_v5_{'17ch' if USE_LAGGED_STRESS else '11ch'}"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     BATCH_SIZE = 32
@@ -89,7 +90,7 @@ def main():
     # 2) Configure & Instantiate PatchTST
     # ──────────────────────────────────────────────
     config = PatchTSTConfig(
-        num_input_channels=17,  # 11 original + 6 lagged‐stress channels
+        num_input_channels = 17 if USE_LAGGED_STRESS else 11,
         num_targets=6,  # 6 stress outputs
         context_length=MAX_SEQ_LEN,  # look-back window
         prediction_length=1,  # point-wise
@@ -125,7 +126,8 @@ def main():
         num_workers=NUM_WORKERS,
         split="train",          # Only load the training portion
         split_ratio=0.8,        # 80% train, 20% val
-        seed=SEED               # Fixed split for reproducibility
+        seed=SEED,               # Fixed split for reproducibility
+        use_lagged_stress = USE_LAGGED_STRESS
     )
 
     # 3bis) Validation DataLoader
@@ -139,6 +141,7 @@ def main():
         split="val",
         split_ratio=0.8,
         seed=SEED,
+        use_lagged_stress=USE_LAGGED_STRESS
     )
 
     # Extract fitted scaler (for later saving)
@@ -261,7 +264,7 @@ def main():
     print(f"✅ Saved target scaler:    {target_scaler_path}")
 
     # ───────────────────────────────────────────────────
-    # Save the pretty ASCII model summary to its own .txt
+    # Save the ASCII model summary to its own .txt
     # ───────────────────────────────────────────────────
     summary_txt_path = os.path.join(MODEL_DIR, "patchtst_summary.txt")
     with open(summary_txt_path, "w") as f:
@@ -279,6 +282,12 @@ def main():
     with open(log_path, "w") as f:
         json.dump(resource_log, f, indent=2)
     print(f"✅ Saved resource log: {log_path}\n")
+
+    # Save training mode to config
+    mode_path = os.path.join(MODEL_DIR, "mode_config.json")
+    with open(mode_path, "w") as f:
+        json.dump({"use_lagged_stress": USE_LAGGED_STRESS}, f, indent=2)
+    print(f"✅ Saved training mode config: {mode_path}")
 
     # Display summary
     print("=== Resource Summary ===")

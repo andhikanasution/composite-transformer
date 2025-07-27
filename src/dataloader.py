@@ -11,7 +11,8 @@ def get_dataloader(input_csv_path,
                    scale=True,
                    split="all",
                    split_ratio=0.8,
-                   seed=42):
+                   seed=42,
+                   use_lagged_stress=True):
     """
     Returns a PyTorch DataLoader for the composite stress prediction dataset.
 
@@ -37,7 +38,8 @@ def get_dataloader(input_csv_path,
         scale=scale,
         split=split,
         split_ratio=split_ratio,
-        seed=seed
+        seed=seed,
+        use_lagged_stress = use_lagged_stress
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
