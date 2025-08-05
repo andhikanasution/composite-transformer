@@ -98,19 +98,9 @@ def main():
     # ──────────────────────────────────────────────
     # 3) Prepare validation DataLoader
     # ──────────────────────────────────────────────
-    val_loader = get_dataloader(
-        input_csv_path=INPUT_CSV,
-        data_dir=DATA_DIR,
-        max_seq_len=MAX_SEQ_LEN,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        scale=True,                # feed raw inputs → HF model will standardize
-        num_workers=NUM_WORKERS,
-        split="val",
-        split_ratio=SPLIT_RATIO,
-        seed=SEED,
-        use_lagged_stress=USE_LAGGED
-    )
+    val_loader = get_dataloader(input_csv_path=INPUT_CSV, data_dir=DATA_DIR, max_seq_len=MAX_SEQ_LEN,
+                                batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, scale=True, split="val",
+                                split_ratio=SPLIT_RATIO, seed=SEED, use_lagged_stress=USE_LAGGED)
 
     # ──────────────────────────────────────────────
     # 4) Inference

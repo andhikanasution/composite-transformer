@@ -117,32 +117,14 @@ def main():
     # ──────────────────────────────────────────────
     # 3) Prepare DataLoader
     # ──────────────────────────────────────────────
-    train_loader = get_dataloader(
-        input_csv_path=INPUT_CSV,
-        data_dir=DATA_DIR,
-        max_seq_len=MAX_SEQ_LEN,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=NUM_WORKERS,
-        split="train",          # Only load the training portion
-        split_ratio=0.8,        # 80% train, 20% val
-        seed=SEED,               # Fixed split for reproducibility
-        use_lagged_stress = USE_LAGGED_STRESS
-    )
+    train_loader = get_dataloader(input_csv_path=INPUT_CSV, data_dir=DATA_DIR, max_seq_len=MAX_SEQ_LEN,
+                                  batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, split="train",
+                                  split_ratio=0.8, seed=SEED, use_lagged_stress=USE_LAGGED_STRESS)
 
     # 3bis) Validation DataLoader
-    val_loader = get_dataloader(
-        input_csv_path=INPUT_CSV,
-        data_dir=DATA_DIR,
-        max_seq_len=MAX_SEQ_LEN,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        split="val",
-        split_ratio=0.8,
-        seed=SEED,
-        use_lagged_stress=USE_LAGGED_STRESS
-    )
+    val_loader = get_dataloader(input_csv_path=INPUT_CSV, data_dir=DATA_DIR, max_seq_len=MAX_SEQ_LEN,
+                                batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, split="val",
+                                split_ratio=0.8, seed=SEED, use_lagged_stress=USE_LAGGED_STRESS)
 
     # Extract fitted scaler (for later saving)
     input_scaler = train_loader.dataset.input_scaler

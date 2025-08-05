@@ -1,10 +1,10 @@
 from torch.utils.data import DataLoader
-from dataset import CompositeStressDataset
+from src.dataset import CompositeStressDataset
 
 
 def get_dataloader(input_csv_path,
                    data_dir,
-                   max_seq_len=1800,
+                   max_seq_len=200,
                    batch_size=32,
                    shuffle=True,
                    num_workers=2,
@@ -12,7 +12,7 @@ def get_dataloader(input_csv_path,
                    split="all",
                    split_ratio=0.8,
                    seed=42,
-                   use_lagged_stress=True):
+                   use_lagged_stress=False):
     """
     Returns a PyTorch DataLoader for the composite stress prediction dataset.
 

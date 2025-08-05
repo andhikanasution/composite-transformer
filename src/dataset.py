@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import Dataset
-from utils_parsing import load_all_data
-from normalisation import compute_stats, StandardScaler, apply_scaling
+from src.utils_parsing import load_all_data
+from src.normalisation import compute_stats, StandardScaler, apply_scaling
 import numpy as np
 
 class CompositeStressDataset(Dataset):
@@ -15,8 +15,8 @@ class CompositeStressDataset(Dataset):
     Optionally applies Z-score standardisation (recommended for model training).
     """
 
-    def __init__(self, input_csv_path, data_dir, max_seq_len=1800, scale=True, split="all", split_ratio=0.8, seed=42,
-                 use_lagged_stress=True):
+    def __init__(self, input_csv_path, data_dir, max_seq_len=200, scale=True, split="all", split_ratio=0.8, seed=42,
+                 use_lagged_stress=False):
         """
         Args:
             input_csv_path (str): Path to the metadata file (IM78552_DATABASEInput.csv)
@@ -30,7 +30,7 @@ class CompositeStressDataset(Dataset):
         super().__init__()
 
         # Load all raw sequences
-        inputs_raw, targets_raw = load_all_data(input_csv_path, data_dir, max_seq_len)
+        inputs_raw, targets_raw, masks_raw = load_all_data(input_csv_path, data_dir, max_seq_len)
 
         # Determine indices for splitting
         total_samples = len(inputs_raw)
@@ -55,6 +55,7 @@ class CompositeStressDataset(Dataset):
         # Subset the data
         self.inputs_raw = [inputs_raw[i] for i in selected]
         self.targets_raw = [targets_raw[i] for i in selected]
+        self.masks_raw = [masks_raw[i] for i in selected]
 
         # Apply optional standardisation
         if scale:
@@ -89,6 +90,7 @@ class CompositeStressDataset(Dataset):
 
         self.inputs  = [torch.tensor(x, dtype=torch.float32) for x in self.inputs]   # [T,17]
         self.targets = [torch.tensor(y, dtype=torch.float32) for y in self.targets]  # [T, 6]
+        self.masks = [torch.tensor(m, dtype=torch.bool) for m in self.masks_raw]
 
     def __len__(self):
         """Returns total number of samples in the dataset."""
@@ -96,4 +98,4 @@ class CompositeStressDataset(Dataset):
 
     def __getitem__(self, idx):
         """Returns a single (input_sequence, target_sequence) pair."""
-        return self.inputs[idx], self.targets[idx]
+        return self.inputs[idx], self.masks[idx], self.targets[idx]

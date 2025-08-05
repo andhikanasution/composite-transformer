@@ -94,18 +94,9 @@ def main():
     # 3) Prepare Validation DataLoader
     # ──────────────────────────────────────────────
     # scale=False → we feed raw inputs, the model’s internal scaler will normalize them
-    val_loader = get_dataloader(
-        input_csv_path=INPUT_CSV,
-        data_dir=DATA_DIR,
-        max_seq_len=MAX_SEQ_LEN,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        scale=True,
-        num_workers=NUM_WORKERS,
-        split="val",
-        split_ratio=SPLIT_RATIO,
-        seed=SEED,
-    )
+    val_loader = get_dataloader(input_csv_path=INPUT_CSV, data_dir=DATA_DIR, max_seq_len=MAX_SEQ_LEN,
+                                batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, scale=True, split="val",
+                                split_ratio=SPLIT_RATIO, seed=SEED)
 
     # ──────────────────────────────────────────────
     # 4) Inference on Validation Split

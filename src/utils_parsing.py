@@ -105,98 +105,79 @@ def build_sample_mapping(data_dir):
     }
 
 
-def pad_sequence(seq, max_len, pad_value=0.0):
-    """
-    Left-pad (or left-truncate) a 2D sequence to exactly max_len time steps.
-    - If seq is longer than max_len: keep *the last* max_len rows.
-    - If seq is shorter: pre-pend zeros so that the final entry (idx=-1)
-      is always the true last time-step.
-
-    Args:
-        seq (np.ndarray): [T, D] original time series
-        max_len (int):    desired length
-        pad_value (float): scalar to pad with (default=0.0)
-
-    Returns:
-        np.ndarray of shape [max_len, D], with true data ending at index -1
-    """
+def resample_sequence(seq: np.ndarray, target_len: int) -> np.ndarray:
     T, D = seq.shape
-    if T >= max_len:
-        # Truncate from the front so we keep the *most recent* max_len steps
-        return seq[-max_len:, :]
+    if T >= target_len:
+        # choose indices in [0..T-1] that are evenly spaced
+        idx = np.linspace(0, T - 1, num=target_len).round().astype(int)
+        return seq[idx]
     else:
-        # Pre-pend padding so that `seq` ends at the very end
-        pad = np.full((max_len - T, D), pad_value)
-        return np.vstack([pad, seq])
-
+        # pad so that data ends at seq[-1]
+        pad = np.zeros((target_len - T, D), dtype=seq.dtype)
+        return np.vstack([seq, pad])
 
 
 def load_all_data(input_csv_path,
                   data_dir,
-                  max_seq_len=1800,
-                  strain_threshold=0.05,
+                  max_seq_len=200,
+                  strain_threshold=0.025,
                   min_timesteps=20,
                   component_thresholds=None):
     """
-    Load and preprocess the full dataset of composite RVE simulations.
-
-    Each simulation includes:
-        - Time-series strain and stress data (E1–E6, S1–S6)
-        - Static metadata (load angle + lamination parameters)
-
-    Filtering is applied on the strain data:
-        - Either a global ±strain_threshold is used (default), or
-        - A selective per-component threshold can be provided via a dictionary.
-
-    Sequences with fewer than `min_timesteps` valid points after filtering are excluded.
-
-    Args:
-        input_csv_path (str): Path to the metadata CSV file (IM78552_DATABASEInput.csv).
-        data_dir (str): Path to the directory containing the individual time-series CSV files.
-        max_seq_len (int): Sequence length to pad or truncate each input to (default: 1800).
-        strain_threshold (float): Global threshold for filtering all strain components.
-                                  Ignored if component_thresholds is provided.
-        min_timesteps (int): Minimum number of valid time steps required to keep a sample (default: 20).
-        component_thresholds (dict or None): Optional per-component strain limits.
-            Format: {0: 0.05, 5: 0.10} to apply ±0.05 on E1 and ±0.10 on E6.
+    Load and preprocess the full dataset of composite RVE simulations,
+    returning padded inputs, targets, and a mask that indicates which
+    timesteps are real (True) vs padded (False).
 
     Returns:
-        Tuple:
-            - all_inputs (List[np.ndarray]): Padded input sequences of shape [max_seq_len, 11]
-            - all_targets (List[np.ndarray]): Padded output sequences of shape [max_seq_len, 6]
+        all_inputs (List[np.ndarray]): [max_seq_len, D_in] arrays
+        all_targets (List[np.ndarray]): [max_seq_len, D_out] arrays
+        all_masks (List[np.ndarray]): 1D boolean arrays of length max_seq_len
     """
-    # Load static metadata: θ + lamination parameters
+    # 1) Load static metadata → shape (N_cases, 5)
     metadata = load_metadata(input_csv_path)
 
-    # Build mapping from index to each sample file
+    # 2) Map each index to its CSV file
     mapping = build_sample_mapping(data_dir)
 
-    # Containers for all sequences
-    all_inputs, all_targets = [], []
+    all_inputs, all_targets, all_masks = [], [], []
 
-    for idx, path in mapping.items():
-        # Load and filter time-series using either global or selective strain threshold
+    for idx, file_path in mapping.items():
+        # 3) Load & filter by global or per-component thresholds
         strain_seq, stress_seq = load_time_series(
-            file_path=path,
+            file_path,
             strain_threshold=strain_threshold,
             component_thresholds=component_thresholds
         )
-
-        # Skip this sample if it has too few valid timesteps after filtering
+        # 4) Discard too-short runs
         if strain_seq.shape[0] < min_timesteps:
             continue
 
-        # Attach static metadata to each time step
-        static_info = np.tile(metadata[idx], (strain_seq.shape[0], 1))  # Shape: [T, 5]
-        input_seq = np.hstack([strain_seq, static_info])                # Shape: [T, 11]
+        # 5) Once any strain exceeds threshold, truncate at first exceed
+        exceed = np.any(np.abs(strain_seq) > strain_threshold, axis=1)
+        if exceed.any():
+            t_end = np.argmax(exceed)
+            strain_seq = strain_seq[: t_end + 1]
+            stress_seq = stress_seq[: t_end + 1]
 
-        # Pad input and output to fixed length
-        input_seq_padded = pad_sequence(input_seq, max_seq_len)        # [max_seq_len, 11]
-        target_seq_padded = pad_sequence(stress_seq, max_seq_len)      # [max_seq_len, 6]
+        # 6) Attach static metadata at every timestep
+        static_info = np.tile(metadata[idx], (strain_seq.shape[0], 1))  # [T, 5]
+        input_seq = np.hstack([strain_seq, static_info])              # [T, 11]
 
-        # Add to output lists
-        all_inputs.append(input_seq_padded)
-        all_targets.append(target_seq_padded)
+        # 7) Resample/pad to uniform length (end-padding only)
+        input_resampled  = resample_sequence(input_seq,  max_seq_len)  # [max_seq_len, 11]
+        target_resampled = resample_sequence(stress_seq, max_seq_len)  # [max_seq_len,  6]
 
-    return all_inputs, all_targets
+        # 8) Build a mask: True for real timesteps (up to original length), False for padding
+        real_len = min(strain_seq.shape[0], max_seq_len)
+        mask = np.concatenate([
+            np.ones(real_len, dtype=bool),
+            np.zeros(max_seq_len - real_len, dtype=bool)
+        ])  # shape: (max_seq_len,)
+
+        # 9) Collect
+        all_inputs .append(input_resampled)
+        all_targets.append(target_resampled)
+        all_masks  .append(mask)
+
+    return all_inputs, all_targets, all_masks
 

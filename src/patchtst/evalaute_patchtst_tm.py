@@ -100,19 +100,9 @@ def main():
     # ──────────────────────────────────────────────
     # 3) Prepare validation dataset (no teacher forcing!)
     # ──────────────────────────────────────────────
-    val_loader = get_dataloader(
-        input_csv_path=INPUT_CSV,
-        data_dir=DATA_DIR,
-        max_seq_len=MAX_SEQ_LEN,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        scale=True,               # we will feed scaled inputs
-        num_workers=NUM_WORKERS,
-        split="val",
-        split_ratio=SPLIT_RATIO,
-        seed=SEED,
-        use_lagged_stress=False   # disable builtin lagged channels
-    )
+    val_loader = get_dataloader(input_csv_path=INPUT_CSV, data_dir=DATA_DIR, max_seq_len=MAX_SEQ_LEN,
+                                batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, scale=True, split="val",
+                                split_ratio=SPLIT_RATIO, seed=SEED, use_lagged_stress=False)
 
     # ──────────────────────────────────────────────
     # 4) Time-marching inference
