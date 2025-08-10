@@ -14,9 +14,10 @@ class CompositeStressDataset(Dataset):
 
     Optionally applies Z-score standardisation (recommended for model training).
     """
-
-    def __init__(self, input_csv_path, data_dir, max_seq_len=200, scale=True, split="all", split_ratio=0.8, seed=42,
-                 use_lagged_stress=False):
+    def __init__(self, input_csv_path, data_dir, max_seq_len=200, scale=True,
+                 split="all", split_ratio=0.8, seed=42,
+                 use_lagged_stress=False,
+                 input_scaler=None, target_scaler=None):
         """
         Args:
             input_csv_path (str): Path to the metadata file (IM78552_DATABASEInput.csv)
@@ -26,22 +27,20 @@ class CompositeStressDataset(Dataset):
             split (str): 'train', 'val', or 'all' — determines which subset to load
             split_ratio (float): Fraction of data to use for training (only used if split != 'all')
             seed (int): Random seed for reproducible split
+            input_scaler/target_scaler: if provided, reuse these (e.g., for val/test)
         """
         super().__init__()
 
         # Load all raw sequences
-        inputs_raw, targets_raw, masks_raw = load_all_data(input_csv_path, data_dir, max_seq_len)
+        inputs_raw, targets_raw, times_raw, masks_raw = load_all_data(input_csv_path, data_dir, max_seq_len)
 
-        # Determine indices for splitting
-        total_samples = len(inputs_raw)
-        indices = list(range(total_samples))
-        torch.manual_seed(seed)
-        torch.random.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        # Determine indices for splitting (randomized)
+        n_samples = len(inputs_raw)
+        indices = np.arange(n_samples)
+        rng = np.random.default_rng(seed)
+        rng.shuffle(indices)
 
-        split_point = int(split_ratio * total_samples)
+        split_point = int(split_ratio * n_samples)
         if split == "train":
             selected = indices[:split_point]
         elif split == "val":
@@ -56,14 +55,21 @@ class CompositeStressDataset(Dataset):
         self.inputs_raw = [inputs_raw[i] for i in selected]
         self.targets_raw = [targets_raw[i] for i in selected]
         self.masks_raw = [masks_raw[i] for i in selected]
+        self.times_raw = [times_raw[i] for i in selected]
 
-        # Apply optional standardisation
+        # Apply optional standardisation (train-only compute; reuse for val/test)
         if scale:
-            input_mean, input_std = compute_stats(self.inputs_raw)
-            target_mean, target_std = compute_stats(self.targets_raw)
-
-            self.input_scaler = StandardScaler(input_mean, input_std)
-            self.target_scaler = StandardScaler(target_mean, target_std)
+            if input_scaler is None or target_scaler is None:
+                # Only allowed when this is the *train* split
+                if split != "train":
+                    raise ValueError("Val/test must receive precomputed scalers from the train split.")
+                input_mean, input_std = compute_stats(self.inputs_raw)
+                target_mean, target_std = compute_stats(self.targets_raw)
+                self.input_scaler = StandardScaler(input_mean, input_std)
+                self.target_scaler = StandardScaler(target_mean, target_std)
+            else:
+                self.input_scaler = input_scaler
+                self.target_scaler = target_scaler
 
             # scale both inputs and targets
             self.inputs = apply_scaling(self.inputs_raw, self.input_scaler)  # list of [T,11]
@@ -90,6 +96,7 @@ class CompositeStressDataset(Dataset):
 
         self.inputs  = [torch.tensor(x, dtype=torch.float32) for x in self.inputs]   # [T,17]
         self.targets = [torch.tensor(y, dtype=torch.float32) for y in self.targets]  # [T, 6]
+        self.times = [torch.tensor(t, dtype=torch.float32) for t in times_raw]
         self.masks = [torch.tensor(m, dtype=torch.bool) for m in self.masks_raw]
 
     def __len__(self):
@@ -98,4 +105,4 @@ class CompositeStressDataset(Dataset):
 
     def __getitem__(self, idx):
         """Returns a single (input_sequence, target_sequence) pair."""
-        return self.inputs[idx], self.masks[idx], self.targets[idx]
+        return self.inputs[idx], self.masks[idx], self.times[idx], self.targets[idx]

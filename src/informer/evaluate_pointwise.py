@@ -15,64 +15,16 @@ import matplotlib.pyplot as plt
 from src.dataloader import get_dataloader
 from informer.models.model import Informer
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1) Model wrapper (must match training)
-# ──────────────────────────────────────────────────────────────────────────────
-SEQ_LEN   = 200
-LABEL_LEN = 200
-PRED_LEN  = 200
-
-class InformerForPointwise(nn.Module):
-    def __init__(self, enc_in, dec_in, c_out):
-        super().__init__()
-        self.dec_in = int(dec_in)
-        self.net = Informer(
-            enc_in=enc_in,
-            dec_in=dec_in,
-            c_out=c_out,
-            seq_len=SEQ_LEN,
-            label_len=LABEL_LEN,
-            out_len=PRED_LEN,
-            factor=5,
-            d_model=128,
-            n_heads=4,
-            e_layers=3,
-            d_layers=2,
-            d_ff=512,
-            dropout=0.1,
-            attn='prob',
-            embed='fixed',
-            freq='t',
-            activation='gelu',
-            output_attention=False,
-            distil=True,
-            mix=True
-        )
-
-    def forward(self, x_enc):
-        B = x_enc.size(0)
-        x_dec      = torch.zeros(B, LABEL_LEN, self.dec_in, device=x_enc.device)
-        x_mark_enc = torch.zeros(B, SEQ_LEN, 5,        device=x_enc.device)
-        x_mark_dec = torch.zeros(B, LABEL_LEN, 5,      device=x_enc.device)
-        return self.net(x_enc, x_mark_enc, x_dec, x_mark_dec)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 2) Metric functions
-# ──────────────────────────────────────────────────────────────────────────────
 def compute_metrics(y_true, y_pred):
     """y_true, y_pred: [N, C]"""
     rmse = np.sqrt(np.mean((y_true - y_pred)**2, axis=0))
     r2   = np.array([r2_score(y_true[:,i], y_pred[:,i]) for i in range(y_true.shape[1])])
     return rmse, r2
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3) Evaluation
-# ──────────────────────────────────────────────────────────────────────────────
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Paths
     INPUT_CSV = os.path.expanduser(
         "~/Library/CloudStorage/OneDrive-UniversityofBristol/"
         "2. Data Science MSc/Modules/Data Science Project/"
@@ -83,8 +35,13 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR  = "models/informer_pointwise_v2"
+    MODEL_DIR  = "models/informer_pointwise_v3"
     MODEL_PATH = os.path.join(MODEL_DIR, "best_pointwise.pt")
+
+    # must match training
+    SEQ_LEN = 200
+    LABEL_LEN = 1
+    PRED_LEN = SEQ_LEN
 
     # 3a) Build val DataLoader
     val_loader = get_dataloader(
@@ -101,13 +58,51 @@ def main():
         use_lagged_stress=False
     )
 
+    class InformerForPointwise(nn.Module):
+        def __init__(self, enc_in, dec_in, c_out):
+            super().__init__()
+            self.dec_in = int(dec_in)
+            self.seq_len = SEQ_LEN
+            self.label_len = LABEL_LEN
+            self.pred_len = PRED_LEN
+            self.net = Informer(
+                enc_in=enc_in,
+                dec_in=dec_in,
+                c_out=c_out,
+                seq_len=self.seq_len,
+                label_len=self.label_len,
+                out_len=self.pred_len,
+                factor=5,
+                d_model=128,
+                n_heads=4,
+                e_layers=3,
+                d_layers=2,
+                d_ff=512,
+                dropout=0.1,
+                attn='prob',
+                embed='fixed',
+                freq='s',
+                activation='gelu',
+                output_attention=False,
+                distil=True,
+                mix=True
+            )
+
+        def forward(self, x_enc):
+            B = int(x_enc.shape[0])
+            x_mark_enc = x_enc.new_zeros((B, self.seq_len, 5))
+            x_mark_dec = x_enc.new_zeros((B, self.label_len + self.pred_len, 5))
+            x_dec = x_enc.new_zeros((B, self.label_len + self.pred_len, self.dec_in))
+            x_dec[:, self.label_len:, :] = x_enc
+            return self.net(x_enc, x_mark_enc, x_dec, x_mark_dec)
+
     # scalers
     target_scaler = val_loader.dataset.target_scaler
 
     # 3b) Instantiate & load model
-    enc_in = val_loader.dataset.inputs[0].shape[1]
-    dec_in = val_loader.dataset.targets[0].shape[1]
-    model  = InformerForPointwise(enc_in, dec_in, dec_in).to(device)
+    enc_in = val_loader.dataset.inputs[0].shape[1]  # 11
+    dec_in = enc_in  # decoder sees same exogenous
+    model = InformerForPointwise(enc_in, dec_in, c_out=6).to(device)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     model.eval()
 
@@ -116,18 +111,17 @@ def main():
 
     start_time = time.time()
     with torch.no_grad():
-        for x, pad_mask, y in tqdm(val_loader, desc="Evaluating"):
-            # Move to device
+        for x, pad_mask, times, y in tqdm(val_loader, desc="Evaluating"):
             x, pad_mask, y = x.to(device), pad_mask.to(device), y.to(device)
 
             # Forward pass
-            pred = model(x)  # [B, SEQ_LEN, C]
+            pred = model(x)  # [B, PRED_LEN, 6]
 
             # Flatten batch+time
             B, T, C = pred.shape
-            pred_flat = pred.view(-1, C).cpu().numpy()  # [B*T, C]
-            y_flat    = y   .view(-1, C).cpu().numpy()  # [B*T, C]
-            mask_flat = pad_mask.view(-1).cpu().numpy() # [B*T]
+            pred_flat = pred.reshape(-1, C).cpu().numpy()
+            y_flat = y[:, :T, :].reshape(-1, C).cpu().numpy()
+            mask_flat = pad_mask[:, :T].reshape(-1).cpu().numpy()
 
             # Keep only real timesteps
             real_mask = mask_flat.astype(bool)
@@ -135,9 +129,9 @@ def main():
             all_trues.append(y_flat[real_mask])
 
             # Final‐step (only if that timestep is real)
-            pad_final = pad_mask[:, -1].cpu().numpy()  # [B]
-            pred_last = pred[:, -1, :].cpu().numpy()   # [B, C]
-            y_last    = y   [:, -1, :].cpu().numpy()   # [B, C]
+            pad_final = pad_mask[:, :T][:, -1].cpu().numpy()  # last real in window
+            pred_last = pred[:, -1, :].cpu().numpy()
+            y_last = y[:, :T, :][:, -1, :].cpu().numpy()
 
             valid_final = pad_final.astype(bool)
             final_preds.append(pred_last[valid_final])
@@ -184,9 +178,9 @@ def main():
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     axes = axes.flatten()
     for i, ax in enumerate(axes):
-        ax.scatter(final_trues[:, i], final_preds[:, i], s=5, alpha=0.4)
-        mn = min(final_trues[:, i].min(), final_preds[:, i].min())
-        mx = max(final_trues[:, i].max(), final_preds[:, i].max())
+        ax.scatter(final_trues_phys[:, i], final_preds_phys[:, i], s=5, alpha=0.4)
+        mn = min(final_trues_phys[:, i].min(), final_preds_phys[:, i].min())
+        mx = max(final_trues_phys[:, i].max(), final_preds_phys[:, i].max())
         ax.plot([mn, mx], [mn, mx], '--', color='gray', linewidth=1)
         ax.set_title(f"S{i+1} (R²={r2_final[i]:.3f})", fontsize=14)
         ax.set_xlabel("True final stress");  ax.set_ylabel("Predicted")
@@ -208,7 +202,7 @@ def main():
     # build a colormap
     cmap = plt.get_cmap("tab10")
     colors = cmap(np.linspace(0, 1, n_plot))
-    times = np.arange(PRED_LEN)
+    t_axis = np.arange(PRED_LEN)
 
     for comp in range(n_components):
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -217,11 +211,11 @@ def main():
             end = start + PRED_LEN
             seq_true = all_trues_phys[start:end, comp]
             seq_pred = all_preds_phys[start:end, comp]
-            ax.plot(times, seq_true,
+            ax.plot(t_axis, seq_true,
                     color=colors[j],
                     linestyle='-',
                     alpha=0.7)
-            ax.plot(times, seq_pred,
+            ax.plot(t_axis, seq_pred,
                     color=colors[j],
                     linestyle='--',
                     alpha=0.7)

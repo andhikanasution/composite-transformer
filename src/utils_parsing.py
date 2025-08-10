@@ -19,7 +19,7 @@ def load_metadata(input_path):
     return np.hstack([theta, lam_params])
 
 
-def load_time_series(file_path, strain_threshold=0.05, component_thresholds=None):
+def load_time_series(file_path, strain_threshold=0.025, component_thresholds=None):
     """
     Load and filter a single time-series file for composite strain–stress data.
 
@@ -85,7 +85,12 @@ def load_time_series(file_path, strain_threshold=0.05, component_thresholds=None
     filtered_strain = strain_seq[mask]
     filtered_stress = stress_seq[mask]
 
-    return filtered_strain, filtered_stress
+    # also grab the time column (in seconds)
+    time_seq = df["time"].values  # [T]
+    # apply the same mask
+    filtered_time = time_seq[mask]
+
+    return filtered_strain, filtered_stress, filtered_time
 
 
 def build_sample_mapping(data_dir):
@@ -139,11 +144,11 @@ def load_all_data(input_csv_path,
     # 2) Map each index to its CSV file
     mapping = build_sample_mapping(data_dir)
 
-    all_inputs, all_targets, all_masks = [], [], []
+    all_inputs, all_targets, all_times, all_masks = [], [], [], []
 
     for idx, file_path in mapping.items():
         # 3) Load & filter by global or per-component thresholds
-        strain_seq, stress_seq = load_time_series(
+        strain_seq, stress_seq, time_seq = load_time_series(
             file_path,
             strain_threshold=strain_threshold,
             component_thresholds=component_thresholds
@@ -158,6 +163,7 @@ def load_all_data(input_csv_path,
             t_end = np.argmax(exceed)
             strain_seq = strain_seq[: t_end + 1]
             stress_seq = stress_seq[: t_end + 1]
+            time_seq = time_seq[:t_end + 1]
 
         # 6) Attach static metadata at every timestep
         static_info = np.tile(metadata[idx], (strain_seq.shape[0], 1))  # [T, 5]
@@ -166,6 +172,7 @@ def load_all_data(input_csv_path,
         # 7) Resample/pad to uniform length (end-padding only)
         input_resampled  = resample_sequence(input_seq,  max_seq_len)  # [max_seq_len, 11]
         target_resampled = resample_sequence(stress_seq, max_seq_len)  # [max_seq_len,  6]
+        time_resampled = resample_sequence(time_seq.reshape(-1, 1), max_seq_len).flatten()
 
         # 8) Build a mask: True for real timesteps (up to original length), False for padding
         real_len = min(strain_seq.shape[0], max_seq_len)
@@ -177,7 +184,8 @@ def load_all_data(input_csv_path,
         # 9) Collect
         all_inputs .append(input_resampled)
         all_targets.append(target_resampled)
+        all_times.append(time_resampled)
         all_masks  .append(mask)
 
-    return all_inputs, all_targets, all_masks
+    return all_inputs, all_targets, all_times, all_masks
 

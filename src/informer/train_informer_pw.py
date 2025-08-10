@@ -13,7 +13,7 @@ from tqdm import tqdm
 from sklearn.metrics import r2_score
 
 from informer.models.model import Informer
-from src.dataloader import get_dataloader
+from src.dataloader import make_train_val_loaders
 
 def compute_metrics(y_true, y_pred):
     """Both are [N_total, c_out]"""
@@ -28,8 +28,10 @@ def main():
     print(f"Using device: {DEVICE}")
 
     # Hyperparams
-    BATCH_SIZE, MAX_EPOCHS, LR = 32, 20, 1e-4
-    SEQ_LEN, LABEL_LEN, PRED_LEN = 200, 200, 200
+    BATCH_SIZE, MAX_EPOCHS, LR = 32, 30, 1e-4
+    SEQ_LEN = 200
+    LABEL_LEN = 1  # start token length
+    PRED_LEN = SEQ_LEN  # predict full sequence
 
     INPUT_CSV = os.path.expanduser(
         "~/Library/CloudStorage/OneDrive-UniversityofBristol/"
@@ -41,53 +43,30 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR  = "models/informer_pointwise_v2"
+    MODEL_DIR  = "models/informer_pointwise_v3"
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # 1) DataLoaders
-    train_loader = get_dataloader(
-        input_csv_path=INPUT_CSV,
-        data_dir=DATA_DIR,
-        max_seq_len=SEQ_LEN,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=2,
-        scale=True,
-        split="train",
-        split_ratio=0.8,
-        seed=42,
-        use_lagged_stress=False,
+    # 1) DataLoaders (train scalers -> reused for val), NO lagged stress for pointwise
+    train_loader, val_loader, input_scaler, target_scaler = make_train_val_loaders(
+        INPUT_CSV, DATA_DIR, max_seq_len=SEQ_LEN, batch_size=BATCH_SIZE,
+        split_ratio = 0.8, seed = 42, use_lagged_stress = False
     )
-    val_loader = get_dataloader(
-        input_csv_path=INPUT_CSV,
-        data_dir=DATA_DIR,
-        max_seq_len=SEQ_LEN,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=2,
-        scale=True,
-        split="val",
-        split_ratio=0.8,
-        seed=42,
-        use_lagged_stress=False,
-    )
-
-    # scalers
-    input_scaler  = train_loader.dataset.input_scaler
-    target_scaler = train_loader.dataset.target_scaler
 
     # 2) Model wrapper
     class InformerForPointwise(nn.Module):
         def __init__(self, enc_in, dec_in, c_out):
             super().__init__()
             self.dec_in = int(dec_in)
+            self.seq_len = SEQ_LEN
+            self.label_len = LABEL_LEN
+            self.pred_len = PRED_LEN
             self.net = Informer(
                 enc_in=enc_in,
                 dec_in=dec_in,
                 c_out=c_out,
-                seq_len=SEQ_LEN,
-                label_len=LABEL_LEN,
-                out_len=PRED_LEN,
+                seq_len=self.seq_len,
+                label_len = self.label_len,
+                out_len = self.pred_len,
                 factor=5,
                 d_model=128,
                 n_heads=4,
@@ -97,7 +76,7 @@ def main():
                 dropout=0.1,
                 attn='prob',
                 embed='fixed',
-                freq='t',
+                freq='s',
                 activation='gelu',
                 output_attention=False,
                 distil=True,
@@ -105,15 +84,25 @@ def main():
             )
 
         def forward(self, x_enc):
-            B = x_enc.size(0)
-            x_dec      = torch.zeros(B, LABEL_LEN, self.dec_in, device=x_enc.device)
-            x_mark_enc = torch.zeros(B, SEQ_LEN, 5,        device=x_enc.device)
-            x_mark_dec = torch.zeros(B, LABEL_LEN, 5,      device=x_enc.device)
+            """
+            Pointwise mapping: given encoder inputs for all timesteps,
+            feed the decoder with a dummy start token + the same known exogenous inputs.
+            """
+
+            B = int(x_enc.shape[0])
+            # time marks are zeros (embed='fixed')
+            x_mark_enc = x_enc.new_zeros((B, self.seq_len, 5))
+            x_mark_dec = x_enc.new_zeros((B, self.label_len + self.pred_len, 5))
+            # decoder input: [zero start token; known exogenous per timestep]
+            x_dec = x_enc.new_zeros((B, self.label_len + self.pred_len, self.dec_in))
+            x_dec[:, self.label_len:, :] = x_enc  # copy encoder exogenous into decoder future
+            # Informer outputs [B, pred_len, c_out]
+
             return self.net(x_enc, x_mark_enc, x_dec, x_mark_dec)
 
     # instantiate
-    enc_in = train_loader.dataset.inputs[0].shape[1]
-    dec_in = train_loader.dataset.targets[0].shape[1]
+    enc_in = train_loader.dataset.inputs[0].shape[1]  # 11 (E1..E6 + theta + LP1..LP4)
+    dec_in = enc_in  # decoder sees same exogenous
     model  = InformerForPointwise(enc_in, dec_in, dec_in).to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LR)
 
@@ -127,14 +116,14 @@ def main():
         model.train()
         train_loss = 0.0
 
-        for x, pad_mask, y in tqdm(train_loader, desc=f"Epoch {epoch} [TRAIN]"):
-            x, pad_mask, y = x.to(DEVICE), pad_mask.to(DEVICE), y.to(DEVICE)
+        for x, pad_mask, times, y in tqdm(train_loader, desc=f"Epoch {epoch} [TRAIN]"):
+            x, pad_mask, times, y = x.to(DEVICE), pad_mask.to(DEVICE), times.to(DEVICE), y.to(DEVICE)
 
             optimizer.zero_grad()
             pred = model(x)  # [B, SEQ_LEN, C]
 
             # masked MSE
-            B, T, C = pred.shape
+            B, T, C = pred.shape  # T == PRED_LEN == SEQ_LEN
             pred_flat = pred.view(-1, C)
             y_flat    = y.view(-1, C)
             mask_flat = pad_mask.view(-1, 1).expand(-1, C)
@@ -154,22 +143,22 @@ def main():
         last_preds, last_trues = [], []
 
         with torch.no_grad():
-            for x, pad_mask, y in tqdm(val_loader, desc=f"Epoch {epoch} [VAL]"):
+            for x, pad_mask, times, y in tqdm(val_loader, desc=f"Epoch {epoch} [VAL]"):
                 x, pad_mask, y = x.to(DEVICE), pad_mask.to(DEVICE), y.to(DEVICE)
                 pred = model(x)
 
                 # masked MSE
                 B, T, C = pred.shape
-                pred_flat = pred.view(-1, C)
-                y_flat    = y.view(-1, C)
-                mask_flat = pad_mask.view(-1, 1).expand(-1, C)
+                pred_flat = pred.reshape(-1, C)
+                y_flat = y[:, :T, :].reshape(-1, C)
+                mask_flat = pad_mask[:, :T].reshape(-1, 1).expand(-1, C)
                 loss = ((pred_flat - y_flat)**2)[mask_flat].mean()
                 val_loss += loss.item() * B
 
                 # bring everything to NumPy
                 pred_np = pred.cpu().numpy()  # [B, T, C]
-                y_np = y.cpu().numpy()  # [B, T, C]
-                mask_np = pad_mask.cpu().numpy()  # [B, T]
+                y_np = y[:, :T, :].cpu().numpy()  # [B, T, C]
+                mask_np = pad_mask[:, :T].cpu().numpy()  # [B, T]
 
                 # flatten batch+time
                 pred_flat = pred_np.reshape(-1, C)  # [B*T, C]
@@ -227,10 +216,10 @@ def main():
         json.dump(resources, f, indent=2)
     print("Resources:", resources)
 
-    with open(os.path.join(MODEL_DIR, "input_scaler.json"), "w") as f:
-        json.dump(input_scaler.to_dict(), f, indent=2)
-    with open(os.path.join(MODEL_DIR, "target_scaler.json"), "w") as f:
-        json.dump(target_scaler.to_dict(), f, indent=2)
+    # persist scalers together
+    with open(os.path.join(MODEL_DIR, "scalers.json"), "w") as f:
+        json.dump({"input": input_scaler.to_dict(),
+                   "target": target_scaler.to_dict()}, f, indent=2)
 
 if __name__ == "__main__":
     main()

@@ -12,25 +12,10 @@ def get_dataloader(input_csv_path,
                    split="all",
                    split_ratio=0.8,
                    seed=42,
-                   use_lagged_stress=False):
-    """
-    Returns a PyTorch DataLoader for the composite stress prediction dataset.
+                   use_lagged_stress=False,
+                   input_scaler=None,
+                   target_scaler=None):
 
-    Args:
-        input_csv_path (str): Path to IM78552_DATABASEInput.csv
-        data_dir (str): Path to the _CSV folder containing all time-series files
-        max_seq_len (int): Length to pad/truncate sequences
-        batch_size (int): Batch size for training
-        shuffle (bool): Whether to shuffle the dataset (used in training)
-        num_workers (int): Number of subprocesses for data loading
-        scale (bool): Whether to apply Z-score standardisation
-        split (str): 'train', 'val', or 'all'
-        split_ratio (float): Ratio of training data if split is not 'all'
-        seed (int): Random seed for reproducible split
-
-    Returns:
-        DataLoader
-    """
     dataset = CompositeStressDataset(
         input_csv_path=input_csv_path,
         data_dir=data_dir,
@@ -39,7 +24,35 @@ def get_dataloader(input_csv_path,
         split=split,
         split_ratio=split_ratio,
         seed=seed,
-        use_lagged_stress = use_lagged_stress
+        use_lagged_stress=use_lagged_stress,
+        input_scaler=input_scaler,
+        target_scaler=target_scaler
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
+    do_shuffle = (split == "train") and shuffle
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=do_shuffle, num_workers=num_workers)
+
+def make_train_val_loaders(input_csv_path,
+                           data_dir,
+                           max_seq_len=200,
+                           batch_size=32,
+                           split_ratio=0.8,
+                           seed=42,
+                           use_lagged_stress=True):
+    """
+    Convenience: builds train loader (computes scalers) and val loader (reuses them).
+    """
+    train_loader = get_dataloader(input_csv_path, data_dir, max_seq_len,
+                                  batch_size=batch_size, shuffle=True,
+                                  split="train", split_ratio=split_ratio, seed=seed,
+                                  use_lagged_stress=use_lagged_stress,
+                                  input_scaler=None, target_scaler=None)
+    in_scaler  = train_loader.dataset.input_scaler if hasattr(train_loader.dataset, "input_scaler") else None
+    out_scaler = train_loader.dataset.target_scaler if hasattr(train_loader.dataset, "target_scaler") else None
+    val_loader   = get_dataloader(input_csv_path, data_dir, max_seq_len,
+                                  batch_size=batch_size, shuffle=False,
+                                  split="val", split_ratio=split_ratio, seed=seed,
+                                  use_lagged_stress=use_lagged_stress,
+                                  input_scaler=in_scaler, target_scaler=out_scaler)
+    return train_loader, val_loader, in_scaler, out_scaler
