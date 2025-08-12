@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 
 from src.dataloader import get_dataloader
 from informer.models.model import Informer
+from src.normalisation import StandardScaler
 
 def compute_metrics(y_true, y_pred):
     """y_true, y_pred: [N, C]"""
@@ -38,6 +39,12 @@ def main():
     MODEL_DIR  = "models/informer_pointwise_v3"
     MODEL_PATH = os.path.join(MODEL_DIR, "best_pointwise.pt")
 
+    scalers_path = os.path.join(MODEL_DIR, "scalers.json")
+    with open(scalers_path, "r") as f:
+        sc = json.load(f)
+    input_scaler = StandardScaler.from_dict(sc["input"])
+    target_scaler = StandardScaler.from_dict(sc["target"])
+
     # must match training
     SEQ_LEN = 200
     LABEL_LEN = 1
@@ -55,7 +62,9 @@ def main():
         split="val",
         split_ratio=0.8,
         seed=42,
-        use_lagged_stress=False
+        use_lagged_stress=False,
+        input_scaler=input_scaler,
+        target_scaler = target_scaler,
     )
 
     class InformerForPointwise(nn.Module):
@@ -116,6 +125,18 @@ def main():
 
             # Forward pass
             pred = model(x)  # [B, PRED_LEN, 6]
+
+            # —— Build per-sequence arrays for plotting ——
+            if 'seq_trues' not in locals():
+                seq_trues, seq_preds = [], []
+            B, T, C = pred.shape
+            mask_np_b = pad_mask[:, :T].cpu().numpy()  # [B, T]
+            y_np_b = y[:, :T, :].cpu().numpy()  # [B, T, 6]
+            pred_np_b = pred.cpu().numpy()  # [B, T, 6]
+            for bi in range(B):
+                valid_len = int(mask_np_b[bi].sum())
+                seq_trues.append(y_np_b[bi, :valid_len])  # [valid_len, 6]
+                seq_preds.append(pred_np_b[bi, :valid_len])  # [valid_len, 6]
 
             # Flatten batch+time
             B, T, C = pred.shape
@@ -189,50 +210,23 @@ def main():
     plt.savefig(os.path.join(MODEL_DIR, "scatter_final_timestep_components.png"), dpi=300)
     plt.close(fig)
 
-    # 5) Time‐series plot: a few representative samples, with legend
-    # assume all_trues_phys, all_preds_phys are shape [N_total, 6]
-    # and PRED_LEN == 200
-    n_plot = 5
-    n_components = 6
-    # how many sequences are in val set:
-    n_sequences = len(val_loader.dataset)
-    # pick sample indices
-    sample_idxs = np.random.choice(n_sequences, size=n_plot, replace=False)
-
-    # build a colormap
-    cmap = plt.get_cmap("tab10")
-    colors = cmap(np.linspace(0, 1, n_plot))
-    t_axis = np.arange(PRED_LEN)
-
-    for comp in range(n_components):
-        fig, ax = plt.subplots(figsize=(10, 6))
-        for j, idx in enumerate(sample_idxs):
-            start = idx * PRED_LEN
-            end = start + PRED_LEN
-            seq_true = all_trues_phys[start:end, comp]
-            seq_pred = all_preds_phys[start:end, comp]
-            ax.plot(t_axis, seq_true,
-                    color=colors[j],
-                    linestyle='-',
-                    alpha=0.7)
-            ax.plot(t_axis, seq_pred,
-                    color=colors[j],
-                    linestyle='--',
-                    alpha=0.7)
-
-        ax.set_xlabel("Timestep", fontsize=12)
-        ax.set_ylabel(f"Stress S{comp + 1}", fontsize=12)
-        ax.set_title(f"Sample true vs pred (component S{comp + 1})", fontsize=14)
-        ax.tick_params(axis='both', which='major', labelsize=10)
-
-        # add a legend only for the line‐styles
-        ax.plot([], [], color='k', linestyle='-', label='True')
-        ax.plot([], [], color='k', linestyle='--', label='Pred')
-        ax.legend(fontsize=12, loc='upper left')
-
-        plt.tight_layout()
-        fig.savefig(os.path.join(MODEL_DIR, f"time_series_S{comp + 1}.png"), dpi=300)
-        plt.close(fig)
+    # 5) Time-series plots: sample a few full sequences (uses per-sequence lists)
+    if len(seq_trues) > 0:
+        n_plot = min(5, len(seq_trues))
+        sample_idxs = np.random.choice(len(seq_trues), size=n_plot, replace=False)
+        for comp in range(6):
+            fig, ax = plt.subplots(figsize=(10, 6))
+            for j, idx in enumerate(sample_idxs):
+                t = np.arange(len(seq_trues[idx]))
+                ax.plot(t, seq_trues[idx][:, comp], '-', alpha=0.7, label='True' if j == 0 else None)
+                ax.plot(t, seq_preds[idx][:, comp], '--', alpha=0.7, label='Pred' if j == 0 else None)
+            ax.set_xlabel("Timestep", fontsize=12)
+            ax.set_ylabel(f"Stress S{comp + 1}", fontsize=12)
+            ax.set_title(f"S{comp + 1}: sampled sequences", fontsize=14)
+            ax.legend(fontsize=12, loc='upper left')
+            plt.tight_layout()
+            fig.savefig(os.path.join(MODEL_DIR, f"time_series_S{comp + 1}.png"), dpi=300)
+            plt.close(fig)
 
     # 6) Histogram of max‐error
     plt.figure()

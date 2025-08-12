@@ -28,7 +28,7 @@ def main():
     print(f"Using device: {DEVICE}")
 
     # Hyperparams
-    BATCH_SIZE, MAX_EPOCHS, LR = 32, 30, 1e-4
+    BATCH_SIZE, MAX_EPOCHS, LR = 32, 10, 1e-4
     SEQ_LEN = 200
     LABEL_LEN = 1  # start token length
     PRED_LEN = SEQ_LEN  # predict full sequence
@@ -103,7 +103,7 @@ def main():
     # instantiate
     enc_in = train_loader.dataset.inputs[0].shape[1]  # 11 (E1..E6 + theta + LP1..LP4)
     dec_in = enc_in  # decoder sees same exogenous
-    model  = InformerForPointwise(enc_in, dec_in, dec_in).to(DEVICE)
+    model  = InformerForPointwise(enc_in, dec_in, c_out=6).to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LR)
 
     best_val_loss = float("inf")

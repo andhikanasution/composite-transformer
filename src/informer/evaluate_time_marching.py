@@ -13,14 +13,16 @@ from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 
 from src.dataloader import get_dataloader
-from src.dataloader import make_train_val_loaders  # fallback if scalers.json missing
 from informer.models.model import Informer
+from informer.models.attn import TriangularCausalMask
 from src.normalisation import StandardScaler
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3) Metric helper
-# ──────────────────────────────────────────────────────────────────────────────
+class SimpleMask:
+    """Wrap a [B,1,Lq,Lk] boolean tensor with a .mask attribute (Informer expects this)."""
+    def __init__(self, mask: torch.Tensor):
+        self.mask = mask
+
 def compute_metrics(y_true, y_pred):
     """y_true, y_pred: [N, C]"""
     rmse = np.sqrt(np.mean((y_true - y_pred)**2, axis=0))
@@ -46,15 +48,17 @@ def main():
         "2. Data Science MSc/Modules/Data Science Project/"
         "composite_stress_prediction/data/_CSV"
     )
-    MODEL_DIR  = "models/informer_timemarching_v2"
+    MODEL_DIR  = "models/informer_timemarching_v3"
     MODEL_PATH = os.path.join(MODEL_DIR, "best_tm.pt")
 
     SEQ_LEN = 200
     LABEL_LEN = 1
     PRED_LEN = SEQ_LEN - LABEL_LEN
     BATCH = 32
+    # Use the same refinement depth you validated with during training
+    N_REFINE = 8
 
-    # ── Load train scalers (preferred) or fallback to recomputing from train split
+    # Load scalers saved at train time (preferred)
     scalers_path = os.path.join(MODEL_DIR, "scalers.json")
     if os.path.exists(scalers_path):
         with open(scalers_path, "r") as f:
@@ -62,11 +66,7 @@ def main():
         input_scaler = StandardScaler.from_dict(sc["input"])
         target_scaler = StandardScaler.from_dict(sc["target"])
     else:
-        # Fallback: build a tiny train loader to compute scalers (same split/seed as training)
-        _train_loader, _, input_scaler, target_scaler = make_train_val_loaders(
-            INPUT_CSV, DATA_DIR, max_seq_len=SEQ_LEN, batch_size=8,
-            split_ratio = 0.8, seed = 42, use_lagged_stress = True
-        )
+        raise RuntimeError("scalers.json not found in MODEL_DIR; re-run training to save scalers.")
 
     # Build val loader WITHOUT lagged stress baked in; we'll append zeros then refine with predictions
     val_loader = get_dataloader(
@@ -89,43 +89,73 @@ def main():
     # 2) Model wrapper (identical to train_informer_tm.py)
     # ──────────────────────────────────────────────────────────────────────────────
     class InformerTimeMarching(nn.Module):
-        def __init__(self, enc_in, dec_in, c_out):
+        def __init__(self, enc_in, dec_in, c_out, seq_len=SEQ_LEN, label_len=LABEL_LEN, pred_len=PRED_LEN):
             super().__init__()
             self.dec_in = dec_in
-            self.seq_len = SEQ_LEN
-            self.label_len = LABEL_LEN
-            self.pred_len = PRED_LEN
+            self.seq_len, self.label_len, self.pred_len = seq_len, label_len, pred_len
             self.net = Informer(
-                enc_in=enc_in,
-                dec_in=dec_in,
-                c_out=c_out,
-                seq_len=self.seq_len,
-                label_len=self.label_len,
-                out_len=self.pred_len,
-                factor=5,
-                d_model=128,
-                n_heads=4,
-                e_layers=3,
-                d_layers=2,
-                d_ff=512,
-                dropout=0.1,
-                attn='prob',
-                embed='fixed',
-                freq='s',
-                activation='gelu',
-                output_attention=False,
-                distil=True,
-                mix=True
+                enc_in = enc_in, dec_in = dec_in, c_out = c_out,
+                seq_len = seq_len, label_len = label_len, out_len = pred_len,
+                factor = 5,
+                d_model = 192,  # MATCH TRAIN
+                n_heads = 4,
+                e_layers = 3,
+                d_layers = 2,
+                d_ff = 1024,  # MATCH TRAIN
+                dropout = 0.1,
+                attn = 'full',  # MATCH TRAIN
+                embed = 'fixed',
+                freq = 's',
+                activation = 'gelu',
+                output_attention = False,
+                distil = False,  # MATCH TRAIN
+                mix = True
             )
 
-        def forward(self, x_enc, y_start_token):
+        def forward(self, x_enc, y_start_token, pad_mask):
+            """
+            x_enc: [B, seq_len, enc_in] (exogenous + lag)
+            y_start_token: [B, 1, dec_in] (true σ at t=0)
+            pad_mask: [B, seq_len]  True=real, False=pad
+            """
+
             B = int(x_enc.shape[0])
+            device = x_enc.device
+            # time marks (zeros for embed='fixed')
             x_mark_enc = x_enc.new_zeros((B, self.seq_len, 5))
-            x_mark_dec = x_enc.new_zeros((B, self.label_len + self.pred_len, 5))
-            x_dec = x_enc.new_zeros((B, self.label_len + self.pred_len, self.dec_in))
+            Tdec = self.label_len + self.pred_len
+            x_mark_dec = x_enc.new_zeros((B, Tdec, 5))
+
+            # decoder input: start token then zeros
+            x_dec = x_enc.new_zeros((B, Tdec, self.dec_in))
             x_dec[:, :self.label_len, :] = y_start_token
-            out = self.net(x_enc, x_mark_enc, x_dec, x_mark_dec)  # [B, pred_len, 6]
-            return out
+
+            # encoder self-attn: causal + block padded keys
+            enc_tri = TriangularCausalMask(B, self.seq_len, device=device).mask  # [B,1,L,L]
+
+            if pad_mask is not None:
+                enc_key_pad = (~pad_mask[:, :self.seq_len]).unsqueeze(1).unsqueeze(1) \
+                    .expand(B, 1, self.seq_len, self.seq_len)
+                enc_self_mask = SimpleMask(enc_tri | enc_key_pad)
+            else:
+                enc_self_mask = SimpleMask(enc_tri)
+
+            # decoder self-attn: causal
+            dec_self_mask = TriangularCausalMask(B, Tdec, device=device)
+
+            # cross-attn: block padded encoder keys
+            if pad_mask is not None:
+                dec_enc_pad = (~pad_mask[:, :self.seq_len]).unsqueeze(1).unsqueeze(1) \
+                    .expand(B, 1, Tdec, self.seq_len)
+                dec_enc_mask = SimpleMask(dec_enc_pad)
+            else:
+                dec_enc_mask = None
+            return self.net(
+                x_enc, x_mark_enc, x_dec, x_mark_dec,
+                enc_self_mask=enc_self_mask,
+                dec_self_mask = dec_self_mask,
+                dec_enc_mask = dec_enc_mask
+            )  # [B, pred_len, c_out]
 
     target_scaler = val_loader.dataset.target_scaler
 
@@ -154,18 +184,14 @@ def main():
             # append zero lag channels, then refine once using predicted σ(t-1)
             x_base, pad_mask, y = x_base.to(device), pad_mask.to(device), y.to(device)
             B = int(x_base.shape[0])
-
-            lag_zero = x_base.new_zeros((B, SEQ_LEN, dec_in))
-            x = torch.cat([x_base, lag_zero], dim=-1)  # [B, 17]
             y0 = y[:, :1, :]
-
-            # pass 1: initial predictions
-            pred0 = model(x, y0)  # [B, PRED_LEN, 6]
-            lag_pred = x_base.new_zeros((B, SEQ_LEN, dec_in))
-            lag_pred[:, 1:, :] = pred0
-            x_ref = torch.cat([x_base, lag_pred], dim=-1)
-            # pass 2: refined predictions
-            pred = model(x_ref, y0)
+            lag = x_base.new_zeros((B, SEQ_LEN, dec_in))
+            # multi-refinement (same as training val)
+            for _ in range(N_REFINE):
+                x_full = torch.cat([x_base, lag], dim=-1)
+                pred = model(x_full, y0, pad_mask)  # [B, PRED_LEN, 6]
+                lag = lag.clone()
+                lag[:, 1:, :] = pred  # update σ(t-1)
 
             # —— 1) Collect per‐sequence (in phys units) ——
             pred_np = pred.cpu().numpy().reshape(-1, dec_in)
@@ -190,9 +216,9 @@ def main():
             # approximate: take last valid index per sample (mask sum - 1)
             for i in range(B):
                 valid_len = int(mask_np[i].sum())
-            if valid_len > 0:
-                flat_final_preds.append(pred_np[i, valid_len - 1, :][None, :])
-                flat_final_trues.append(true_np[i, valid_len - 1, :][None, :])
+                if valid_len > 0:
+                    flat_final_preds.append(pred_np[i, valid_len - 1, :][None, :])
+                    flat_final_trues.append(true_np[i, valid_len - 1, :][None, :])
 
     eval_time = time.time() - t0
 
