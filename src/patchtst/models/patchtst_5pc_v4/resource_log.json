@@ -1,0 +1,6 @@
+{
+  "train_time_s": 1018.58,
+  "train_mem_diff_mb": -1042.89,
+  "inf_time_s": 0.0113,
+  "inf_mem_diff_mb": 1.48
+}
