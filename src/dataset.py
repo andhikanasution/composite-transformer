@@ -1,108 +1,134 @@
+"""
+Padded, mask-aware Dataset for composite strain→stress prediction.
+
+Each item returns:
+    inputs: [T, Din]  (Din=11 or 17 if use_lagged_stress=True)
+    mask:   [T]       (True for real timesteps, False for padding)
+    times:  [T]
+    targets:[T, 6]
+"""
+
+from typing import Tuple, Optional
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 from src.utils_parsing import load_all_data
 from src.normalisation import compute_stats, StandardScaler, apply_scaling
-import numpy as np
+
 
 class CompositeStressDataset(Dataset):
     """
-    PyTorch Dataset class for composite material strain-to-stress prediction.
+    PyTorch Dataset for padded sequences used by Transformer/LSTM baselines.
 
-    Each sample consists of:
-        - Input sequence: [max_seq_len, 11] → 6 strain components + 1 theta + 4 lamination parameters
-        - Target sequence: [max_seq_len, 6] → 6 stress components
-
-    Optionally applies Z-score standardisation (recommended for model training).
+    Channels:
+        - Inputs:  6 strain components + 1 θ (theta) + 4 lamination parameters = 11
+                   (+6 lagged stress channels if use_lagged_stress=True → Din=17)
+        - Targets: 6 stress components
     """
-    def __init__(self, input_csv_path, data_dir, max_seq_len=200, scale=True,
-                 split="all", split_ratio=0.8, seed=42,
-                 use_lagged_stress=False,
-                 input_scaler=None, target_scaler=None):
+
+    def __init__(
+        self,
+        input_csv_path: str,
+        data_dir: str,
+        max_seq_len: int = 200,
+        scale: bool = True,
+        split: str = "all",
+        split_ratio: float = 0.8,
+        seed: int = 42,
+        use_lagged_stress: bool = False,
+        input_scaler: Optional[StandardScaler] = None,
+        target_scaler: Optional[StandardScaler] = None,
+    ) -> None:
         """
         Args:
-            input_csv_path (str): Path to the metadata file (IM78552_DATABASEInput.csv)
-            data_dir (str): Path to the folder with time-series CSV files (_CSV)
-            max_seq_len (int): Number of timesteps to pad/truncate each sequence to
-            scale (bool): Whether to apply Z-score standardisation
-            split (str): 'train', 'val', or 'all' — determines which subset to load
-            split_ratio (float): Fraction of data to use for training (only used if split != 'all')
-            seed (int): Random seed for reproducible split
-            input_scaler/target_scaler: if provided, reuse these (e.g., for val/test)
+            input_csv_path: Path to IM78552_DATABASEInput.csv (metadata).
+            data_dir: Directory containing per-RVE time-series CSVs.
+            max_seq_len: Pad/truncate all sequences to this T.
+            scale: If True, apply Z-score standardisation.
+            split: {"train","val","all"}.
+            split_ratio: Train/val split proportion (when split != "all").
+            seed: RNG seed used for the index shuffle before splitting.
+            use_lagged_stress: Append lagged stress channels for teacher forcing.
+            input_scaler/target_scaler: If provided, reuse; otherwise fitted on train split.
         """
         super().__init__()
 
-        # Load all raw sequences
-        inputs_raw, targets_raw, times_raw, masks_raw = load_all_data(input_csv_path, data_dir, max_seq_len)
+        # 1) Load raw (unpadded) sequences and masks
+        inputs_raw, targets_raw, times_raw, masks_raw = load_all_data(
+            input_csv_path, data_dir, max_seq_len
+        )
 
-        # Determine indices for splitting (randomized)
+        # 2) Train/val split by shuffled indices (reproducible with seed)
         n_samples = len(inputs_raw)
         indices = np.arange(n_samples)
         rng = np.random.default_rng(seed)
         rng.shuffle(indices)
 
-        split_point = int(split_ratio * n_samples)
+        sp = int(split_ratio * n_samples)
         if split == "train":
-            selected = indices[:split_point]
+            selected = indices[:sp]
         elif split == "val":
-            selected = indices[split_point:]
+            selected = indices[sp:]
         else:
             selected = indices  # full set
 
-        # Store selected indices for downstream access (e.g., for sanity checks)
-        self.indices = selected
+        self.indices = selected  # helpful for audit/debug
 
-        # Subset the data
+        # 3) Subset lists
         self.inputs_raw = [inputs_raw[i] for i in selected]
         self.targets_raw = [targets_raw[i] for i in selected]
         self.masks_raw = [masks_raw[i] for i in selected]
         self.times_raw = [times_raw[i] for i in selected]
 
-        # Apply optional standardisation (train-only compute; reuse for val/test)
+        # 4) Optional Z-score standardisation (fit on train; reuse elsewhere)
         if scale:
-            if input_scaler is None or target_scaler is None:
-                # Only allowed when this is the *train* split
+            if (input_scaler is None) or (target_scaler is None):
                 if split != "train":
                     raise ValueError("Val/test must receive precomputed scalers from the train split.")
-                input_mean, input_std = compute_stats(self.inputs_raw)
-                target_mean, target_std = compute_stats(self.targets_raw)
-                self.input_scaler = StandardScaler(input_mean, input_std)
-                self.target_scaler = StandardScaler(target_mean, target_std)
+                in_mean, in_std = compute_stats(self.inputs_raw)
+                out_mean, out_std = compute_stats(self.targets_raw)
+                self.input_scaler = StandardScaler(in_mean, in_std)
+                self.target_scaler = StandardScaler(out_mean, out_std)
             else:
                 self.input_scaler = input_scaler
                 self.target_scaler = target_scaler
 
-            # scale both inputs and targets
-            self.inputs = apply_scaling(self.inputs_raw, self.input_scaler)  # list of [T,11]
-            self.targets = apply_scaling(self.targets_raw, self.target_scaler)  # list of [T, 6]
+            self.inputs = apply_scaling(self.inputs_raw, self.input_scaler)   # list[[T,11]]
+            self.targets = apply_scaling(self.targets_raw, self.target_scaler)  # list[[T,6]]
         else:
+            self.input_scaler = None
+            self.target_scaler = None
             self.inputs = self.inputs_raw
             self.targets = self.targets_raw
 
-        # ──────────────────────────────────────────────────────
-        # Teacher‐forcing: build lagged‐stress channels
-        # for each sequence, prepend a zero‐row and drop its last true
+        # 5) Optional teacher forcing: append lagged stress channels
         if use_lagged_stress:
             lagged = []
             for y in self.targets:
                 pad0 = np.zeros((1, y.shape[1]), dtype=y.dtype)
                 lag = np.vstack([pad0, y[:-1]])
                 lagged.append(lag)
+            self.inputs = [np.concatenate([x, l], axis=1) for x, l in zip(self.inputs, lagged)]
+            # Din becomes 17 (11 exogenous + 6 lagged stress)
 
-            self.inputs = [
-                np.concatenate([x, lag], axis=1)
-                for x, lag in zip(self.inputs, lagged)
-            ]
-        # else: do nothing, keep original 11 channels
-
-        self.inputs  = [torch.tensor(x, dtype=torch.float32) for x in self.inputs]   # [T,17]
-        self.targets = [torch.tensor(y, dtype=torch.float32) for y in self.targets]  # [T, 6]
-        self.times = [torch.tensor(t, dtype=torch.float32) for t in times_raw]
+        # 6) Convert to tensors
+        self.inputs = [torch.tensor(x, dtype=torch.float32) for x in self.inputs]
+        self.targets = [torch.tensor(y, dtype=torch.float32) for y in self.targets]
+        self.times = [torch.tensor(t, dtype=torch.float32) for t in self.times_raw]
         self.masks = [torch.tensor(m, dtype=torch.bool) for m in self.masks_raw]
 
-    def __len__(self):
-        """Returns total number of samples in the dataset."""
+    # ---- PyTorch Dataset protocol -------------------------------------------------
+
+    def __len__(self) -> int:
+        """Number of cases (RVE sequences) in this split."""
         return len(self.inputs)
 
-    def __getitem__(self, idx):
-        """Returns a single (input_sequence, target_sequence) pair."""
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+            inputs: [T, Din]
+            mask:   [T] (bool)
+            times:  [T]
+            targets:[T, 6]
+        """
         return self.inputs[idx], self.masks[idx], self.times[idx], self.targets[idx]
